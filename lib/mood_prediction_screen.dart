@@ -1,232 +1,285 @@
 import 'package:flutter/material.dart';
 import 'weather_service.dart';
 import 'database_helper.dart';
+import 'prediction_engine.dart';
+import 'supabase_service.dart';
+import 'app_theme.dart';
 
 class MoodPredictionScreen extends StatefulWidget {
+  final String? cityName;
+  const MoodPredictionScreen({Key? key, this.cityName}) : super(key: key);
+
   @override
-  _MoodPredictionScreenState createState() => _MoodPredictionScreenState();
+  State<MoodPredictionScreen> createState() => _MoodPredictionScreenState();
 }
 
 class _MoodPredictionScreenState extends State<MoodPredictionScreen> {
   List<Map<String, dynamic>>? _predictions;
-  double? _accuracy;
-  int _tapCount = 0;
-  bool _showAccuracy = false;
+  String? _city;
+  int _totalCrowdCount = 0;
+  bool _anyUsedSeedData = false;
+  bool _isLoading = true;
+  String? _error;
 
   @override
   void initState() {
     super.initState();
-    _fetchPredictionsAndAccuracy();
+    _loadPredictions();
   }
 
-  _fetchPredictionsAndAccuracy() async {
-    final results = await predictMoodBasedOnWeather();
-    setState(() {
-      _predictions = results['predictions'];
-      _accuracy = results['accuracy'];
-    });
+  Future<void> _loadPredictions() async {
+    try {
+      final forecast = await WeatherService().fetch5DayForecast();
+      final history = await DatabaseHelper.instance.queryLast90Days();
+      final city = widget.cityName ?? await WeatherService().fetchCityName();
+
+      // Group forecast entries by date
+      final Map<String, List<Map<String, dynamic>>> byDate = {};
+      for (final entry in forecast) {
+        final date = (entry['dt_txt'] as String).split(' ')[0];
+        byDate.putIfAbsent(date, () => []).add(entry);
+      }
+
+      final List<Map<String, dynamic>> predictions = [];
+      int totalCrowd = 0;
+      bool anySeed = false;
+
+      for (final date in byDate.keys) {
+        final entries = byDate[date]!;
+
+        // Dominant weather condition for the day
+        final condCount = <String, int>{};
+        for (final e in entries) {
+          final c = e['weather'][0]['main'] as String;
+          condCount[c] = (condCount[c] ?? 0) + 1;
+        }
+        final condition = condCount.entries.reduce((a, b) => a.value > b.value ? a : b).key;
+
+        // Average temp for the day
+        final avgTemp = entries
+            .map((e) => (e['main']['temp'] as num).toDouble())
+            .reduce((a, b) => a + b) / entries.length;
+        final tempRange = SupabaseService.tempRangeBucket(avgTemp);
+
+        // Icon from the middle-of-day entry (or first)
+        final iconEntry = entries.firstWhere(
+          (e) => (e['dt_txt'] as String).contains('12:00'),
+          orElse: () => entries.first,
+        );
+        final iconCode = iconEntry['weather'][0]['icon'] as String;
+
+        final result = await predictMood(
+          weatherCondition: condition,
+          tempRange: tempRange,
+          city: city,
+          personalHistory: history,
+        );
+
+        totalCrowd += result['crowdCount'] as int;
+        if (result['usedSeedData'] == true) anySeed = true;
+
+        predictions.add({
+          'date': date,
+          'condition': condition,
+          'iconCode': iconCode,
+          'avgTemp': avgTemp,
+          ...result,
+        });
+      }
+
+      setState(() {
+        _predictions = predictions;
+        _city = city;
+        _totalCrowdCount = totalCrowd;
+        _anyUsedSeedData = anySeed;
+        _isLoading = false;
+      });
+    } catch (e) {
+      setState(() {
+        _error = 'Unable to load forecast. Check your connection.';
+        _isLoading = false;
+      });
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: GestureDetector(
-          onTap: () {
-            setState(() {
-              _tapCount++;
-              if (_tapCount == 7) {
-                _showAccuracy = true;
-              }
-            });
-          },
-          child: Text('Mood Prediction', style: TextStyle(color: Colors.orangeAccent, fontFamily: 'LuckiestGuy', fontSize: 24)),
-        ),
+        title: const Text('Mood Forecast', style: AppTheme.appBarTitle),
         actions: [
           IconButton(
-            icon: Icon(Icons.info_outline),
-            onPressed: () {
-              showDialog(
-                context: context,
-                builder: (BuildContext context) {
-                  return AlertDialog(
-                    title: Text("Mood Prediction"),
-                    content: Text(
-                        "🔮 The app predicts how you might feel for the next 5 days based on the upcoming weather. \n\n"
-                            "📈 Our advanced prediction models might not always be spot-on initially.\n\n🧠 But hey, even weather forecasts have their cloudy days! Stick with us, and you might just be blown away✨"
-                    ),
-                    actions: [
-                      TextButton(
-
-                        child: Text( style: TextStyle(color: Colors.orangeAccent, fontFamily: 'LuckiestGuy', fontSize: 18),'Got it!'),
-                        onPressed: () {
-                          Navigator.of(context).pop();
-                        },
-                      ),
-                    ],
-                  );
-                },
-              );
-            },
+            icon: const Icon(Icons.info_outline),
+            onPressed: () => _showInfoDialog(context),
           ),
         ],
       ),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator(color: AppTheme.accentOrange))
+          : _error != null
+              ? Center(child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Text(_error!, textAlign: TextAlign.center,
+                    style: const TextStyle(fontFamily: 'Poppins', color: Colors.white54)),
+                ))
+              : _buildContent(),
+    );
+  }
 
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+  Widget _buildContent() {
+    return Column(
+      children: [
+        _buildSourceLabel(),
+        Expanded(
+          child: ListView.builder(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            itemCount: _predictions?.length ?? 0,
+            itemBuilder: (context, i) => _buildForecastCard(_predictions![i]),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSourceLabel() {
+    final text = _anyUsedSeedData
+        ? 'Based on general weather patterns'
+        : 'Powered by $_totalCrowdCount people in ${_city ?? 'your area'}';
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+      child: Text(
+        text,
+        textAlign: TextAlign.center,
+        style: TextStyle(
+          fontFamily: 'Poppins',
+          fontSize: 12,
+          color: _anyUsedSeedData ? Colors.white38 : AppTheme.accentOrange,
+          fontStyle: _anyUsedSeedData ? FontStyle.italic : FontStyle.normal,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildForecastCard(Map<String, dynamic> p) {
+    final date = DateTime.parse(p['date'] as String);
+    final mood = p['mood'] as String;
+    final confidence = p['confidence'] as String;
+    final crowdCount = p['crowdCount'] as int;
+    final usedSeed = p['usedSeedData'] as bool;
+    final condition = p['condition'] as String;
+    final iconCode = p['iconCode'] as String;
+
+    final dayLabel = _dayLabel(date);
+    final dateLabel = '${date.day.toString().padLeft(2, '0')} ${_monthAbbr(date.month)}';
+
+    return Card(
+      color: AppTheme.cardBackground,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      margin: const EdgeInsets.symmetric(vertical: 6),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
           children: [
-            // Commented out the 'Predicted Mood for the Week'
-            // Text(
-            //   'Predicted Mood for the Week: ${_predictions?.first['mood'] ?? 'Fetching...'}',
-            //   style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-            // ),
-            // SizedBox(height: 20),
-            if (_showAccuracy)
-              Text(
-                'Prediction Accuracy: ${_accuracy?.toInt() ?? 0}%',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            // Date column
+            SizedBox(
+              width: 52,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(dayLabel, style: const TextStyle(
+                    fontFamily: 'LuckiestGuy', fontSize: 13, color: AppTheme.accentOrange)),
+                  Text(dateLabel, style: const TextStyle(
+                    fontFamily: 'Poppins', fontSize: 11, color: Colors.white54)),
+                ],
               ),
-            SizedBox(height: 20),
+            ),
+            // Weather icon
+            Image.network(
+              'http://openweathermap.org/img/w/$iconCode.png',
+              width: 40, height: 40,
+              errorBuilder: (_, __, ___) =>
+                  const Icon(Icons.cloud, color: Colors.white38, size: 36),
+            ),
+            const SizedBox(width: 8),
+            // Mood name
             Expanded(
-              child: ListView.builder(
-                itemCount: _predictions?.length ?? 0,
-                itemBuilder: (context, index) {
-                  DateTime date = DateTime.parse(_predictions![index]['date']);
-                  String formattedDate = "${date.day.toString().padLeft(2, '0')}-${date.month.toString().padLeft(2, '0')}-${date.year}";
-                  String mood = _predictions![index]['mood'];
-                  return ListTile(
-                    tileColor: _getMoodColor(mood),
-                    title: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Text(formattedDate, style: TextStyle(fontWeight: FontWeight.bold)),
-                        Text(mood),
-                        _getMoodIcon(mood),
-                      ],
-                    ),
-                  );
-                },
+              child: Text(
+                mood,
+                style: TextStyle(
+                  fontFamily: 'LuckiestGuy',
+                  fontSize: 18,
+                  color: AppTheme.moodColor(mood),
+                ),
               ),
-            )
+            ),
+            // Right column: confidence badge + source
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                _confidenceBadge(confidence),
+                const SizedBox(height: 4),
+                if (!usedSeed && crowdCount > 0)
+                  Text('$crowdCount people',
+                    style: const TextStyle(fontFamily: 'Poppins', fontSize: 10, color: Colors.white38))
+                else
+                  Text(condition,
+                    style: const TextStyle(fontFamily: 'Poppins', fontSize: 10,
+                      color: Colors.white38, fontStyle: FontStyle.italic)),
+              ],
+            ),
           ],
         ),
       ),
     );
   }
 
-  Icon _getMoodIcon(String mood) {
-    switch (mood) {
-      case 'Happy':
-        return Icon(Icons.sentiment_very_satisfied, color: Colors.green);
-      case 'Relaxed':
-        return Icon(Icons.sentiment_satisfied, color: Colors.blue);
-      case 'Sad':
-        return Icon(Icons.sentiment_dissatisfied, color: Colors.grey);
-      case 'Excited':
-        return Icon(Icons.sentiment_very_satisfied, color: Colors.orange);
-      case 'Angry':
-        return Icon(Icons.sentiment_very_dissatisfied, color: Colors.red);
-      case 'Sick':
-        return Icon(Icons.sentiment_neutral, color: Colors.purple);
-      default:
-        return Icon(Icons.sentiment_neutral, color: Colors.grey);
+  Widget _confidenceBadge(String confidence) {
+    Color color;
+    switch (confidence) {
+      case 'high':   color = AppTheme.confidenceHigh; break;
+      case 'medium': color = AppTheme.confidenceMedium; break;
+      default:       color = AppTheme.confidenceLow;
     }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(color: color, borderRadius: BorderRadius.circular(8)),
+      child: Text(
+        confidence.toUpperCase(),
+        style: const TextStyle(fontFamily: 'Poppins', fontSize: 10,
+          fontWeight: FontWeight.bold, color: Colors.white),
+      ),
+    );
   }
 
-  Color? _getMoodColor(String mood) {
-    switch (mood) {
-      case 'Happy':
-        return Colors.green[200];
-      case 'Relaxed':
-        return Colors.blue[200];
-      case 'Sad':
-        return Colors.grey[400];
-      case 'Excited':
-        return Colors.orange[200];
-      case 'Angry':
-        return Colors.red[200];
-      case 'Sick':
-        return Colors.purple[200];
-      default:
-        return Colors.grey[300];
-    }
+  String _dayLabel(DateTime d) {
+    const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    return days[d.weekday - 1];
   }
 
-  Future<Map<String, dynamic>> predictMoodBasedOnWeather() async {
-    List<Map<String, dynamic>> forecast = await WeatherService().fetch5DayForecast();
-    List<Map<String, dynamic>> moodHistory = await DatabaseHelper.instance.queryAllRows();
-
-    // Filter the mood history to consider only the last 90 days
-    DateTime ninetyDaysAgo = DateTime.now().subtract(Duration(days: 90));
-    moodHistory = moodHistory.where((entry) {
-      DateTime entryDate = DateTime.parse(entry['date']);
-      return entryDate.isAfter(ninetyDaysAgo);
-    }).toList();
-
-    // Count the occurrences of each mood for each weather condition
-    Map<String, Map<String, int>> moodWeatherCount = {};
-    for (var entry in moodHistory) {
-      String mood = entry['mood'];
-      String weather = entry['weather'];
-
-      if (moodWeatherCount[weather] == null) {
-        moodWeatherCount[weather] = {};
-      }
-      if (moodWeatherCount[weather]![mood] == null) {
-        moodWeatherCount[weather]![mood] = 1;
-      } else {
-        moodWeatherCount[weather]![mood] = moodWeatherCount[weather]![mood]! + 1;
-      }
-    }
-
-    // Aggregate weather data for each day
-    Map<String, List<String>> dailyWeather = {};
-    for (var entry in forecast) {
-      String date = entry['dt_txt'].split(" ")[0];
-      String weather = entry['weather'][0]['main'];
-      if (dailyWeather[date] == null) {
-        dailyWeather[date] = [];
-      }
-      dailyWeather[date]!.add(weather);
-    }
-
-    // Predict the mood for each day based on the most frequent weather condition for that day
-    List<Map<String, dynamic>> predictions = [];
-    for (var date in dailyWeather.keys) {
-      String mostFrequentWeather = dailyWeather[date]!.fold<Map<String, int>>({}, (acc, e) {
-        if (acc[e] == null) {
-          acc[e] = 1;
-        } else {
-          acc[e] = acc[e]! + 1;
-        }
-        return acc;
-      }).entries.reduce((a, b) => a.value > b.value ? a : b).key;
-
-      String mood;
-      if (moodWeatherCount[mostFrequentWeather] != null) {
-        mood = moodWeatherCount[mostFrequentWeather]!.entries.reduce((a, b) => a.value > b.value ? a : b).key;
-      } else {
-        mood = 'Neutral'; // Default mood if no historical data for that weather condition
-      }
-      predictions.add({'date': date, 'mood': mood});
-    }
-
-    // Calculate accuracy
-    int matchCount = 0;
-    for (int i = 0; i < moodHistory.length && i < predictions.length; i++) {
-      if (moodHistory[i]['mood'] == predictions[i]['mood']) {
-        matchCount++;
-      }
-    }
-    double accuracy = matchCount / (moodHistory.length > 0 ? moodHistory.length : 1);
-    accuracy = (accuracy * 100).roundToDouble(); // Round to nearest whole number
-
-    return {
-      'predictions': predictions,
-      'accuracy': accuracy,
-    };
+  String _monthAbbr(int m) {
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return months[m - 1];
   }
 
+  void _showInfoDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Mood Forecast'),
+        content: const Text(
+          '🔮 Predicts how you might feel for the next 5 days based on upcoming weather.\n\n'
+          '🌍 Blends crowd data from people in your city with your own mood history.\n\n'
+          '📊 Confidence reflects how strongly the pattern holds — high means strong agreement.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Got it!',
+              style: TextStyle(color: AppTheme.accentOrange, fontFamily: 'LuckiestGuy', fontSize: 18)),
+          ),
+        ],
+      ),
+    );
+  }
 }
