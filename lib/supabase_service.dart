@@ -3,8 +3,8 @@ import 'device_id_service.dart';
 
 class SupabaseService {
   // TODO: Replace with your Supabase project URL and anon key
-  static const _supabaseUrl = 'YOUR_SUPABASE_URL';
-  static const _supabaseAnonKey = 'YOUR_SUPABASE_ANON_KEY';
+  static const _supabaseUrl = 'https://onlybelieve.db.joefathi.com';
+  static const _supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYW5vbiIsImlzcyI6InN1cGFiYXNlIiwiaWF0IjoxNzgwOTc0ODM4LCJleHAiOjE5Mzg2NTQ4Mzh9.kbNxhGeNARw-JA3GYRiaVZyCuwsc5MCIl6Cv7S8SZ-w';
 
   SupabaseService._privateConstructor();
   static final SupabaseService instance = SupabaseService._privateConstructor();

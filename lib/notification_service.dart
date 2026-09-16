@@ -5,9 +5,10 @@ import 'package:timezone/timezone.dart' as tz;
 
 class NotificationService {
   final FlutterLocalNotificationsPlugin _plugin = FlutterLocalNotificationsPlugin();
+  late final Future<void> _ready;
 
   NotificationService() {
-    _initialize();
+    _ready = _initialize();
   }
 
   Future<void> _initialize() async {
@@ -22,48 +23,62 @@ class NotificationService {
         }
       },
     );
+    await _plugin
+        .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin>()
+        ?.requestNotificationsPermission();
   }
 
   Future<void> scheduleMorningNotification() async {
-    await _plugin.zonedSchedule(
-      0,
-      'Good morning! Check your mood prediction!',
-      'Tap to see how you might feel today.',
-      _nextInstanceOf(7, 0),
-      const NotificationDetails(
-        android: AndroidNotificationDetails(
-          'morning_notification_channel_id',
-          'Morning Notifications',
-          channelDescription: 'Daily morning notification about mood prediction',
-          icon: '@mipmap/ic_launcher',
+    try {
+      await _ready;
+      await _plugin.zonedSchedule(
+        0,
+        'Good morning! Check your mood prediction!',
+        'Tap to see how you might feel today.',
+        _nextInstanceOf(7, 0),
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            'morning_notification_channel_id',
+            'Morning Notifications',
+            channelDescription: 'Daily morning notification about mood prediction',
+            icon: '@mipmap/ic_launcher',
+          ),
         ),
-      ),
-      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
-      matchDateTimeComponents: DateTimeComponents.time,
-    );
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+        matchDateTimeComponents: DateTimeComponents.time,
+      );
+    } catch (e) {
+      debugPrint('Failed to schedule morning notification: $e');
+    }
   }
 
   Future<void> scheduleEveningNotification() async {
-    await _plugin.zonedSchedule(
-      1,
-      'How was your day?',
-      "Don't forget to record your mood for the day.",
-      _nextInstanceOf(20, 0),
-      const NotificationDetails(
-        android: AndroidNotificationDetails(
-          'evening_notification_channel_id',
-          'Evening Notifications',
-          channelDescription: 'Daily evening reminder to record mood',
-          icon: '@mipmap/ic_launcher',
+    try {
+      await _ready;
+      await _plugin.zonedSchedule(
+        1,
+        'How was your day?',
+        "Don't forget to record your mood for the day.",
+        _nextInstanceOf(20, 0),
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            'evening_notification_channel_id',
+            'Evening Notifications',
+            channelDescription: 'Daily evening reminder to record mood',
+            icon: '@mipmap/ic_launcher',
+          ),
         ),
-      ),
-      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
-      matchDateTimeComponents: DateTimeComponents.time,
-    );
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+        matchDateTimeComponents: DateTimeComponents.time,
+      );
+    } catch (e) {
+      debugPrint('Failed to schedule evening notification: $e');
+    }
   }
 
   tz.TZDateTime _nextInstanceOf(int hour, int minute) {

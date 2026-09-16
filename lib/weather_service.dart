@@ -1,12 +1,45 @@
 import 'dart:convert';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:location/location.dart';
 
 class WeatherService {
   final String apiKey = 'cbb938da63f7c6c7e32a7518e3ea2f59';
+  final Location _location = Location();
 
   Future<LocationData> _getLocation() async {
-    return await Location().getLocation();
+    // On a cold app start, the location plugin's Android service can still be
+    // binding when the first call arrives, throwing SERVICE_STATUS_ERROR. Retry
+    // briefly rather than surfacing a spurious failure to the user.
+    for (int attempt = 0; ; attempt++) {
+      try {
+        return await _tryGetLocation();
+      } on PlatformException catch (e) {
+        if (e.code != 'SERVICE_STATUS_ERROR' || attempt >= 3) rethrow;
+        await Future.delayed(Duration(milliseconds: 300 * (attempt + 1)));
+      }
+    }
+  }
+
+  Future<LocationData> _tryGetLocation() async {
+    bool serviceEnabled = await _location.serviceEnabled();
+    if (!serviceEnabled) {
+      serviceEnabled = await _location.requestService();
+      if (!serviceEnabled) {
+        throw Exception('Location services are disabled');
+      }
+    }
+
+    PermissionStatus permission = await _location.hasPermission();
+    if (permission == PermissionStatus.denied) {
+      permission = await _location.requestPermission();
+    }
+    if (permission != PermissionStatus.granted &&
+        permission != PermissionStatus.grantedLimited) {
+      throw Exception('Location permission denied');
+    }
+
+    return await _location.getLocation();
   }
 
   /// Returns condition, icon, temperature, city, and country in one API call.
